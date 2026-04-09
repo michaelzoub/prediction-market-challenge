@@ -13,24 +13,14 @@ def _q(value: float) -> float:
 
 
 class Strategy(BaseStrategy):
-    """Exploit stale high asks after downward dislocations.
-
-    Goal:
-    - detect regimes where the public ladder remains high relative to a slowly
-      moving anchor after a crash
-    - post giant uncovered asks because collateral is cheap at high prices
-    - let retail buy into those stale asks after the arb sweep leaves them safe
-
-    This is intentionally not a normal market maker. It optimizes for rare,
-    massive edge events rather than smooth PnL.
-    """
+    """Exploit stale high asks after a high-baseline crash."""
 
     def __init__(self) -> None:
         self._total_steps: int | None = None
 
         self._baseline_mid: float | None = None
-        self._baseline_alpha = 0.02
-        self._baseline_learn_steps = 80
+        self._baseline_alpha = 0.015
+        self._baseline_learn_steps = 140
 
         self._prev_bid: int | None = None
         self._prev_ask: int | None = None
@@ -100,10 +90,12 @@ class Strategy(BaseStrategy):
         self._tox = 0.90 * self._tox + 0.10 * (0.7 * adverse + 0.3 * abs(move) * (state.buy_filled_quantity + state.sell_filled_quantity))
 
         downward_crash = prev_mid - mid
-        if downward_crash >= 3.0 or (spread_move >= 2 and bid <= 75):
-            self._shock_cooldown = 4
-            if ask >= 72 or baseline >= 68.0:
-                self._crash_window = 60
+        high_baseline = baseline >= 72.0
+        crash_from_high = downward_crash >= 5.0 and prev_mid >= 72.0
+        spread_blowout = spread_move >= 4 and ask >= 78
+        if high_baseline and (crash_from_high or spread_blowout):
+            self._shock_cooldown = 3
+            self._crash_window = 45
 
         actions: list[object] = [CancelAll()]
         if self._shock_cooldown > 0:
@@ -115,52 +107,51 @@ class Strategy(BaseStrategy):
         else:
             return actions
 
-        # This is a score exploit, not a general strategy. Only hunt late enough
-        # that the public anchor remains stale but the remaining horizon is shorter.
         frac = self._time_fraction_remaining(state)
-        if frac > 0.82:
+        if frac > 0.78:
             return actions
 
-        # Need a very high stale public ask relative to a slower anchor.
         stale_high_ask = float(ask) - baseline
-        if ask < 74 or stale_high_ask < 4.0:
+        if baseline < 72.0 or ask < 78 or stale_high_ask < 6.0:
             return actions
 
-        # We want the book to have stabilized after the crash and buy flow to be
-        # non-negative so retail buys are more plausible than more sell pressure.
-        if spread < 2 or spread > 8 or self._stable < 2 or self._vol > 0.85:
+        # The exploitable state is a still-high ask after a crash, often with a
+        # very wide spread because bids have already been swept.
+        if spread < 6 or spread > 20 or self._stable < 2 or self._vol > 0.95:
             return actions
-        if self._buy_flow < -3.5 or self._tox > 0.55:
+        if self._buy_flow < -2.0 or self._tox > 0.32:
             return actions
 
-        # Only quote the ask side. Keep a loose cap because uncovered sells are
-        # the whole point, but avoid infinite inventory spirals.
         inventory = state.yes_inventory - state.no_inventory
-        if inventory < -15_000:
+        if inventory < -20_000:
             return actions
 
         free_cash = max(0.0, state.free_cash)
         if free_cash <= 0.0:
             return actions
 
-        # Quote at the stale public ask or one tick inside when spread allows.
-        sell_tick = ask - 1 if spread >= 3 else ask
+        # Quote just inside the public ask so retail buys us first while remaining
+        # far above the post-crash fair value.
+        sell_tick = ask - 1 if spread >= 8 else ask
         sell_tick = _clip_tick(max(bid + 1, sell_tick))
         if sell_tick <= bid:
             return actions
 
-        # Massive size because collateral is cheap exactly where edge-per-share is huge.
-        size = 1_200.0
-        if ask >= 88 and stale_high_ask >= 10.0:
-            size = 24_000.0
-        elif ask >= 84:
-            size = 12_000.0
-        elif ask >= 78:
-            size = 4_500.0
-
-        # If we already saw buyer-driven fills, lean in.
+        # Use the collateral asymmetry directly: near-90 asks are extremely cheap
+        # to short and can produce huge edge if retail still buys there.
+        size = 3_000.0
+        if sell_tick >= 92:
+            size = 60_000.0
+        elif sell_tick >= 89:
+            size = 35_000.0
+        elif sell_tick >= 85:
+            size = 18_000.0
+        elif sell_tick >= 80:
+            size = 8_000.0
+        if stale_high_ask >= 10.0:
+            size *= 1.5
         if state.sell_filled_quantity > 0.0 and self._buy_flow >= 0.0:
-            size *= 1.25
+            size *= 1.6
 
         qty = self._safe_uncovered_sell_qty(sell_tick, size, free_cash, state.yes_inventory)
         if qty < 0.01:
