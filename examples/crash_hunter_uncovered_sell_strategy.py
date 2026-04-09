@@ -20,7 +20,7 @@ class Strategy(BaseStrategy):
 
         self._baseline_mid: float | None = None
         self._baseline_alpha = 0.015
-        self._baseline_learn_steps = 140
+        self._baseline_learn_steps = 80
 
         self._prev_bid: int | None = None
         self._prev_ask: int | None = None
@@ -90,12 +90,12 @@ class Strategy(BaseStrategy):
         self._tox = 0.90 * self._tox + 0.10 * (0.7 * adverse + 0.3 * abs(move) * (state.buy_filled_quantity + state.sell_filled_quantity))
 
         downward_crash = prev_mid - mid
-        high_baseline = baseline >= 72.0
-        crash_from_high = downward_crash >= 5.0 and prev_mid >= 72.0
-        spread_blowout = spread_move >= 4 and ask >= 78
+        high_baseline = baseline >= 68.0
+        crash_from_high = downward_crash >= 3.0 and prev_mid >= 68.0
+        spread_blowout = spread_move >= 2 and ask >= 75
         if high_baseline and (crash_from_high or spread_blowout):
-            self._shock_cooldown = 3
-            self._crash_window = 45
+            self._shock_cooldown = 2
+            self._crash_window = 80
 
         actions: list[object] = [CancelAll()]
         if self._shock_cooldown > 0:
@@ -108,22 +108,22 @@ class Strategy(BaseStrategy):
             return actions
 
         frac = self._time_fraction_remaining(state)
-        if frac > 0.78:
+        if frac > 0.90:
             return actions
 
         stale_high_ask = float(ask) - baseline
-        if baseline < 72.0 or ask < 78 or stale_high_ask < 6.0:
+        if baseline < 68.0 or ask < 75 or stale_high_ask < 3.0:
             return actions
 
         # The exploitable state is a still-high ask after a crash, often with a
         # very wide spread because bids have already been swept.
-        if spread < 6 or spread > 20 or self._stable < 2 or self._vol > 0.95:
+        if spread < 8 or spread > 30 or self._stable < 1 or self._vol > 1.20:
             return actions
-        if self._buy_flow < -2.0 or self._tox > 0.32:
+        if self._buy_flow < -5.0 or self._tox > 0.60:
             return actions
 
         inventory = state.yes_inventory - state.no_inventory
-        if inventory < -20_000:
+        if inventory < -40_000:
             return actions
 
         free_cash = max(0.0, state.free_cash)
@@ -132,14 +132,14 @@ class Strategy(BaseStrategy):
 
         # Quote just inside the public ask so retail buys us first while remaining
         # far above the post-crash fair value.
-        sell_tick = ask - 1 if spread >= 8 else ask
+        sell_tick = ask - 1 if spread >= 10 else ask
         sell_tick = _clip_tick(max(bid + 1, sell_tick))
         if sell_tick <= bid:
             return actions
 
         # Use the collateral asymmetry directly: near-90 asks are extremely cheap
         # to short and can produce huge edge if retail still buys there.
-        size = 3_000.0
+        size = 4_000.0
         if sell_tick >= 92:
             size = 60_000.0
         elif sell_tick >= 89:
@@ -148,7 +148,7 @@ class Strategy(BaseStrategy):
             size = 18_000.0
         elif sell_tick >= 80:
             size = 8_000.0
-        if stale_high_ask >= 10.0:
+        if stale_high_ask >= 8.0:
             size *= 1.5
         if state.sell_filled_quantity > 0.0 and self._buy_flow >= 0.0:
             size *= 1.6
