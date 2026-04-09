@@ -18,6 +18,8 @@ it settles to `0`.
 
 - `docs/orderbook_prediction_market_challenge.md`
   Challenge specification and rule summary.
+- `docs/strategy_frontier_handoff.md`
+  Practical strategy ranking, research takeaways, and optimizer brief.
 - `orderbook_pm_challenge/`
   Local simulator, strategy API, CLI, and scoring implementation.
 - `examples/starter_strategy.py`
