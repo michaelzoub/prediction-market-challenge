@@ -13,15 +13,16 @@ def _q(value: float) -> float:
 
 
 class Strategy(BaseStrategy):
-    """Market maker built from a reservation-price + risk-premium model.
+    """Market maker built from a participation-first microstructure model.
 
     First-principles view for this simulator:
     - We do not make money from predicting long-run direction.
     - We make money when our quotes survive the arb sweep and are then consumed
       by uninformed retail at favorable prices.
-    - Therefore, we estimate a reservation price and only quote if the observed
-      competitor spread is wide enough to compensate for forecast error,
-      toxicity, and inventory risk.
+    - Therefore, the core decision is not "where is fair?" but "is the public
+      spread wide enough to pay for the adverse-selection risk of quoting?".
+    - We only quote when the observed spread comfortably exceeds our estimated
+      uncertainty band; then we place orders near the safe edges of that band.
     """
 
     def __init__(self) -> None:
@@ -29,7 +30,7 @@ class Strategy(BaseStrategy):
         self.prev_bid: int | None = None
         self.prev_ask: int | None = None
 
-        # Latent fair-value filter.
+        # Public-state filter.
         self.fast_mid = 50.0
         self.slow_mid = 50.0
         self.flow_ewma = 0.0
@@ -38,6 +39,7 @@ class Strategy(BaseStrategy):
         self.vol_ewma = 0.0
         self.tox_ewma = 0.0
         self.adverse_run = 0
+        self.wide_streak = 0
         self.stability = 0
         self.cooldown = 0
 
@@ -68,6 +70,7 @@ class Strategy(BaseStrategy):
         )
         self.prev_bid = bid
         self.prev_ask = ask
+        self.wide_streak = self.wide_streak + 1 if spread >= 5 else 0
         self.stability = self.stability + 1 if touch_move <= 1 else 0
 
         buy_fill = state.buy_filled_quantity
@@ -105,53 +108,55 @@ class Strategy(BaseStrategy):
         inventory = state.yes_inventory - state.no_inventory
         free_cash = max(0.0, state.free_cash)
 
-        # Reservation price = filtered fair-value estimate minus inventory cost.
         trend = self.fast_mid - self.slow_mid
-        reservation = mid + 0.35 * trend - 0.45 * self.flow_ewma - 0.035 * inventory
+        directional_signal = 0.65 * self.flow_ewma + 0.35 * trend
 
-        # Risk premium required to survive arb + earn spread from retail.
-        uncertainty = 0.85 * self.vol_ewma + 0.35 * self.tox_ewma + 0.08 * max(0, 2 - self.stability)
-        half_spread = 1.0 + 1.75 * uncertainty
-        half_spread = min(4.0, max(1.0, half_spread))
-
-        # Only provide liquidity if the observed public spread can pay for our
-        # risk premium with at least one tick of slack.
-        required_spread = int(round(2.0 * half_spread + 1.0))
-        if spread < required_spread:
+        # Estimated uncertainty band around a public reservation price.
+        uncertainty = 1.20 * self.vol_ewma + 0.65 * self.tox_ewma + 0.10 * max(0, 2 - self.stability)
+        band = min(4.0, max(1.5, 1.55 + 1.90 * uncertainty))
+        required_spread = int(round(2.0 * band + 1.0))
+        if spread < required_spread or self.wide_streak < 2:
             return actions
 
-        # If conditions are quiet and the book is wide, improve the touch by one
-        # tick; otherwise stay farther from the center to reduce arb exposure.
-        improve = 1 if self.stability >= 3 and self.tox_ewma < 0.18 and self.vol_ewma < 0.30 else 0
+        # Reservation price from public information only, with a stronger
+        # inventory penalty than directional alpha.
+        reservation = mid + 0.18 * trend - 0.34 * self.flow_ewma - 0.045 * inventory
 
-        raw_bid = reservation - half_spread
-        raw_ask = reservation + half_spread
+        # We quote near the safe band edges rather than near midpoint.
+        raw_bid = reservation - band
+        raw_ask = reservation + band
         buy_tick = _clip_tick(round(raw_bid))
         sell_tick = _clip_tick(round(raw_ask))
-        buy_tick = max(bid + improve, min(ask - 1, buy_tick))
-        sell_tick = min(ask - improve, max(bid + 1, sell_tick))
+        buy_tick = max(bid, min(ask - 1, buy_tick))
+        sell_tick = min(ask, max(bid + 1, sell_tick))
+
+        # If the book is both wide and stable, step one tick inside; otherwise
+        # keep the safer edge prices.
+        if self.wide_streak >= 4 and self.stability >= 3 and self.tox_ewma < 0.14 and self.vol_ewma < 0.24:
+            buy_tick = max(buy_tick, min(ask - 1, bid + 1))
+            sell_tick = min(sell_tick, max(bid + 1, ask - 1))
         if buy_tick >= sell_tick:
             return actions
 
-        # Size is the product of expected edge and survival probability, so we
-        # shrink aggressively as the uncertainty estimate rises.
-        size = 6.0
-        size *= max(0.25, 1.0 - 0.55 * self.vol_ewma - 0.45 * self.tox_ewma)
+        # Size should scale with survival probability more than with spread.
+        size = 5.2
+        size *= max(0.18, 1.0 - 0.85 * self.vol_ewma - 0.60 * self.tox_ewma)
         if abs(inventory) > 70:
             size = min(size, 2.0)
+        elif self.wide_streak >= 5 and self.stability >= 3 and self.tox_ewma < 0.12:
+            size *= 1.15
         size = max(0.8, size)
 
         quote_buy = inventory < 165
         quote_sell = inventory > -165
 
-        directional_signal = 0.55 * self.flow_ewma + 0.45 * trend
-        if directional_signal > 0.70:
+        if directional_signal > 0.55:
             quote_sell = False
-        elif directional_signal < -0.70:
+        elif directional_signal < -0.55:
             quote_buy = False
 
         # Under strong toxicity, only quote the inventory-reducing side.
-        if self.tox_ewma > 0.28 or self.adverse_run >= 4:
+        if self.tox_ewma > 0.22 or self.adverse_run >= 3:
             if inventory > 0:
                 quote_buy = False
             elif inventory < 0:
@@ -160,7 +165,7 @@ class Strategy(BaseStrategy):
                 quote_buy = False
                 quote_sell = False
 
-        budget = free_cash * 0.28
+        budget = free_cash * 0.24
         if quote_buy:
             buy_qty = self._buy_qty(buy_tick, size, budget)
             if buy_qty >= 0.01 and buy_tick < ask:
