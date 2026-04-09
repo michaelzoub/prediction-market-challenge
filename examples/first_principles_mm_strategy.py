@@ -112,9 +112,9 @@ class Strategy(BaseStrategy):
         directional_signal = 0.65 * self.flow_ewma + 0.35 * trend
 
         # Estimated uncertainty band around a public reservation price.
-        uncertainty = 1.20 * self.vol_ewma + 0.65 * self.tox_ewma + 0.10 * max(0, 2 - self.stability)
-        band = min(4.0, max(1.5, 1.55 + 1.90 * uncertainty))
-        required_spread = int(round(2.0 * band + 1.0))
+        uncertainty = 1.15 * self.vol_ewma + 0.55 * self.tox_ewma + 0.08 * max(0, 2 - self.stability)
+        band = min(3.5, max(1.25, 1.35 + 1.55 * uncertainty))
+        required_spread = int(round(2.0 * band + 0.5))
         if spread < required_spread or self.wide_streak < 2:
             return actions
 
@@ -132,7 +132,7 @@ class Strategy(BaseStrategy):
 
         # If the book is both wide and stable, step one tick inside; otherwise
         # keep the safer edge prices.
-        if self.wide_streak >= 4 and self.stability >= 3 and self.tox_ewma < 0.14 and self.vol_ewma < 0.24:
+        if self.wide_streak >= 3 and self.stability >= 3 and self.tox_ewma < 0.18 and self.vol_ewma < 0.28:
             buy_tick = max(buy_tick, min(ask - 1, bid + 1))
             sell_tick = min(sell_tick, max(bid + 1, ask - 1))
         if buy_tick >= sell_tick:
@@ -140,10 +140,10 @@ class Strategy(BaseStrategy):
 
         # Size should scale with survival probability more than with spread.
         size = 5.2
-        size *= max(0.18, 1.0 - 0.85 * self.vol_ewma - 0.60 * self.tox_ewma)
+        size *= max(0.24, 1.0 - 0.70 * self.vol_ewma - 0.45 * self.tox_ewma)
         if abs(inventory) > 70:
             size = min(size, 2.0)
-        elif self.wide_streak >= 5 and self.stability >= 3 and self.tox_ewma < 0.12:
+        elif self.wide_streak >= 4 and self.stability >= 3 and self.tox_ewma < 0.16:
             size *= 1.15
         size = max(0.8, size)
 
@@ -156,7 +156,7 @@ class Strategy(BaseStrategy):
             quote_buy = False
 
         # Under strong toxicity, only quote the inventory-reducing side.
-        if self.tox_ewma > 0.22 or self.adverse_run >= 3:
+        if self.tox_ewma > 0.26 or self.adverse_run >= 4:
             if inventory > 0:
                 quote_buy = False
             elif inventory < 0:
@@ -165,13 +165,13 @@ class Strategy(BaseStrategy):
                 quote_buy = False
                 quote_sell = False
 
-        budget = free_cash * 0.24
+        budget = free_cash * 0.30
         if quote_buy:
             buy_qty = self._buy_qty(buy_tick, size, budget)
             if buy_qty >= 0.01 and buy_tick < ask:
                 actions.append(PlaceOrder(Side.BUY, buy_tick, buy_qty))
                 free_cash = max(0.0, free_cash - (buy_tick / 100.0) * buy_qty)
-                budget = free_cash * 0.28
+                budget = free_cash * 0.30
 
         if quote_sell:
             sell_qty = self._sell_qty(sell_tick, size, budget, state.yes_inventory)
