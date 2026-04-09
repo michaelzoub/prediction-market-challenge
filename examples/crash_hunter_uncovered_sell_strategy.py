@@ -30,7 +30,7 @@ class Strategy(BaseStrategy):
 
         self._baseline_mid: float | None = None
         self._baseline_alpha = 0.02
-        self._baseline_learn_steps = 140
+        self._baseline_learn_steps = 80
 
         self._prev_bid: int | None = None
         self._prev_ask: int | None = None
@@ -100,10 +100,10 @@ class Strategy(BaseStrategy):
         self._tox = 0.90 * self._tox + 0.10 * (0.7 * adverse + 0.3 * abs(move) * (state.buy_filled_quantity + state.sell_filled_quantity))
 
         downward_crash = prev_mid - mid
-        if downward_crash >= 5.0 or (spread_move >= 3 and bid <= 65):
+        if downward_crash >= 3.0 or (spread_move >= 2 and bid <= 75):
             self._shock_cooldown = 4
-            if ask >= 78 or baseline >= 75.0:
-                self._crash_window = 36
+            if ask >= 72 or baseline >= 68.0:
+                self._crash_window = 60
 
         actions: list[object] = [CancelAll()]
         if self._shock_cooldown > 0:
@@ -118,25 +118,25 @@ class Strategy(BaseStrategy):
         # This is a score exploit, not a general strategy. Only hunt late enough
         # that the public anchor remains stale but the remaining horizon is shorter.
         frac = self._time_fraction_remaining(state)
-        if frac > 0.65:
+        if frac > 0.82:
             return actions
 
         # Need a very high stale public ask relative to a slower anchor.
         stale_high_ask = float(ask) - baseline
-        if ask < 82 or stale_high_ask < 8.0:
+        if ask < 74 or stale_high_ask < 4.0:
             return actions
 
         # We want the book to have stabilized after the crash and buy flow to be
         # non-negative so retail buys are more plausible than more sell pressure.
-        if spread < 2 or spread > 5 or self._stable < 3 or self._vol > 0.55:
+        if spread < 2 or spread > 8 or self._stable < 2 or self._vol > 0.85:
             return actions
-        if self._buy_flow < -1.5 or self._tox > 0.22:
+        if self._buy_flow < -3.5 or self._tox > 0.55:
             return actions
 
         # Only quote the ask side. Keep a loose cap because uncovered sells are
         # the whole point, but avoid infinite inventory spirals.
         inventory = state.yes_inventory - state.no_inventory
-        if inventory < -6_000:
+        if inventory < -15_000:
             return actions
 
         free_cash = max(0.0, state.free_cash)
@@ -150,12 +150,12 @@ class Strategy(BaseStrategy):
             return actions
 
         # Massive size because collateral is cheap exactly where edge-per-share is huge.
-        size = 500.0
-        if ask >= 88 and stale_high_ask >= 12.0:
+        size = 1_200.0
+        if ask >= 88 and stale_high_ask >= 10.0:
             size = 24_000.0
-        elif ask >= 85:
+        elif ask >= 84:
             size = 12_000.0
-        elif ask >= 82:
+        elif ask >= 78:
             size = 4_500.0
 
         # If we already saw buyer-driven fills, lean in.
